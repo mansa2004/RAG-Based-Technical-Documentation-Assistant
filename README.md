@@ -120,14 +120,14 @@ flowchart TD
     GD -->|relevant| GEN[generate]
     GD -->|irrelevant, retries left| RW[rewrite_query]
     RW --> R
-    GD -->|irrelevant, retries exhausted| WS{web search<br/>fallback enabled?}
+    GD -->|irrelevant, retries exhausted| WS{web search fallback enabled?}
     WS -->|yes| WSF[web_search_fallback]
     WS -->|no| GU[give_up]
     WSF -->|results found| GEN
     WSF -->|no results| GU
     GEN --> CH[check_hallucination]
     CH --> DONE1([END])
-    GU --> DONE2([END: "I don't know"])
+    GU --> DONE2([END - answers I do not know])
 ```
 
 This is implemented in `src/graph/build_graph.py` using `add_conditional_edges` off the grading node's
