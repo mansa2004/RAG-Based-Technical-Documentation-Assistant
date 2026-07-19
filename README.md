@@ -5,8 +5,6 @@ over a small corpus of technical documentation, grades its own retrieved context
 retries with a rewritten query (up to a limit) when nothing relevant comes back — falling back to an
 honest "I don't know" instead of hallucinating.
 
-Built for the Express Analytics AI/ML Engineer Intern take-home assignment.
-
 ---
 
 ## 1. Overview
