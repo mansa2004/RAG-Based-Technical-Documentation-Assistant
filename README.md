@@ -58,8 +58,8 @@ Edit `.env` and set the values you need:
 | `TOP_K` | No (default `4`) | Number of chunks retrieved per search |
 | `MAX_RETRIES` | No (default `2`) | Query-rewrite retry limit before falling back / giving up |
 | `ENABLE_HALLUCINATION_CHECK` | No (default `true`) | Toggles the Self-RAG-style groundedness check after generation |
-| `ENABLE_WEB_SEARCH_FALLBACK` | No (default `false`) | Toggles the web search fallback node (see below) |
-| `TAVILY_API_KEY` | Only if `ENABLE_WEB_SEARCH_FALLBACK=true` | **Bonus feature.** When the corpus retry loop is exhausted with nothing relevant, the graph can query Tavily's web search API and generate the answer from live web results instead of just refusing. If this key is missing while the fallback is enabled, the graph safely routes to `give_up` instead of erroring — see `web_search_fallback` in `src/graph/nodes.py`. |
+| `ENABLE_WEB_SEARCH_FALLBACK` | No (default `false`) | Toggles the web search fallback node  |
+| `TAVILY_API_KEY` | Only if `ENABLE_WEB_SEARCH_FALLBACK=true` | When the corpus retry loop is exhausted with nothing relevant, the graph can query Tavily's web search API and generate the answer from live web results instead of just refusing. If this key is missing while the fallback is enabled, the graph safely routes to `give_up` instead of erroring — see `web_search_fallback` in `src/graph/nodes.py`. |
 
 Defaults use local embeddings (`sentence-transformers`), so no embedding API key is required out of the
 box, and the web search fallback is off by default so `TAVILY_API_KEY` is optional unless you turn it on.
@@ -103,49 +103,46 @@ The smoke tests cover chunking and graph-routing logic without requiring an LLM 
 
 ## 3. Architecture
 
-```mermaid
-flowchart TD
-    Q[question] --> AQ[analyze_query]
-    AQ --> R[retrieve]
-    R --> GD[grade_documents]
-
-    GD -->|relevant| GEN[generate]
-    GD -->|irrelevant, retries left| RW[rewrite_query]
-    RW --> R
-
-    GD -->|irrelevant, retries exhausted| WS{web search<br/>fallback enabled?}
-
-    WS -->|yes| WSF[web_search_fallback]
-    WS -->|no| GU[give_up]
-
-    WSF -->|results found| GEN
-    WSF -->|no results| GU
-
-    GEN --> CH[check_hallucination]
-    CH --> DONE1([END])
-
-    GU --> DONE2([END: "I don't know"])
+```
+                     ┌──────────────────┐
+        question ──► │  analyze_query   │  rewrite + classify query type
+                     └────────┬─────────┘
+                              ▼
+                     ┌──────────────────┐
+              ┌─────►│    retrieve      │  vector similarity search (top-k)
+              │      └────────┬─────────┘
+              │               ▼
+              │      ┌──────────────────┐
+              │      │ grade_documents  │  LLM grades each chunk relevant/irrelevant
+              │      └────────┬─────────┘
+              │               │
+              │     ┌─────────┼─────────────┐
+              │     ▼         ▼             ▼
+              │  relevant   irrelevant,   irrelevant,
+              │     │      retries left   retries exhausted
+              │     ▼         │             ▼
+              │ ┌─────────┐   │   ┌────────────────────┐
+              │ │generate │   │   │ web_search_fallback │  optional (ENABLE_WEB_SEARCH_FALLBACK)
+              │ └────┬────┘   │   └──────────┬──────────┘
+              │      ▼        │      results │  no results / disabled
+              │ ┌───────────────────┐        ▼              ▼
+              │ │check_hallucination│    (-> generate)  ┌──────────┐
+              │ └────────┬──────────┘  │                │ give_up  │──► END ("I don't know")
+              │          ▼             │                └──────────┘
+              │         END            │
+              │                        ▼
+              │               ┌──────────────────┐
+              └───────────────┤   rewrite_query   │  new search query, retry_count += 1
+                               └──────────────────┘
 ```
 
-This is implemented in `src/graph/build_graph.py` using LangGraph's
-`StateGraph` and conditional edges.
-
-- Every request starts at **analyze_query**, where the question is classified and
-  rewritten into a search-friendly query.
-- **retrieve** performs semantic similarity search over the FAISS vector store.
-- **grade_documents** evaluates each retrieved chunk for relevance using the LLM.
-- If relevant context exists, the graph proceeds to **generate**.
-- If no relevant context is found and retries remain, **rewrite_query** produces a
-  better search query and the retrieval loop repeats.
-- Once the retry limit (`MAX_RETRIES`) is exhausted, the graph checks whether the
-  optional web search fallback is enabled.
-- When enabled, **web_search_fallback** queries Tavily for live web results.
-  - If useful results are found, generation continues using that context.
-  - Otherwise the graph routes to **give_up**.
-- **generate** is followed by **check_hallucination**, which verifies that the
-  generated answer is grounded in the supplied context.
-- **give_up** terminates immediately with an honest *"I don't know"* response,
-  avoiding hallucinated answers.
+This is implemented in `src/graph/build_graph.py` using `add_conditional_edges` off the grading node's
+output. The retry loop (`rewrite_query → retrieve → grade_documents → ...`) is bounded by `MAX_RETRIES`
+(default 2), checked inside `grade_documents` before the conditional edge routes. The web search fallback
+is a second, independent safety net that only fires after the retry loop is exhausted, and itself always
+terminates in exactly one hop (no retries on the web search side) so the graph's termination guarantee
+stays simple. Note that `give_up` connects straight to `END`, bypassing `check_hallucination` entirely —
+there's no generated answer to check groundedness on when the graph is honestly refusing.
 
 ### State schema (`src/graph/state.py`)
 
