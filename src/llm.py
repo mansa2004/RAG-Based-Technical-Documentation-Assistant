@@ -26,9 +26,14 @@ def get_llm():
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE)
 
-    # if provider == "anthropic":
-    #     from langchain_anthropic import ChatAnthropic
-    #     return ChatAnthropic(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE)
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        return ChatAnthropic(
+            model_name=config.LLM_MODEL,
+            temperature=config.LLM_TEMPERATURE,
+            timeout=None,
+            stop=None,
+        )
 
     raise ValueError(
         f"Unknown LLM_PROVIDER '{provider}'. Expected one of: groq, google, openai, anthropic."

@@ -47,10 +47,20 @@ def test_routing_function_retry():
     assert _route_after_grading({"route": "retry"}) == "rewrite_query"
 
 
-def test_routing_function_give_up():
+def test_routing_function_give_up_no_web_fallback(monkeypatch):
     from src.graph.build_graph import _route_after_grading
+    from src import config as cfg
 
+    monkeypatch.setattr(cfg, "ENABLE_WEB_SEARCH_FALLBACK", False)
     assert _route_after_grading({"route": "give_up"}) == "give_up"
+
+
+def test_routing_function_give_up_with_web_fallback(monkeypatch):
+    from src.graph.build_graph import _route_after_grading
+    from src import config as cfg
+
+    monkeypatch.setattr(cfg, "ENABLE_WEB_SEARCH_FALLBACK", True)
+    assert _route_after_grading({"route": "give_up"}) == "web_search_fallback"
 
 
 def test_grade_documents_routing_logic():

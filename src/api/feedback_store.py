@@ -37,6 +37,8 @@ def save_feedback(question: str, answer: str, rating: str, comment: str | None, 
             (question, answer, rating, comment, session_id, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
+        if cur.lastrowid is None:
+            raise RuntimeError("INSERT into feedback did not return a rowid.")
         return cur.lastrowid
     finally:
         conn.close()

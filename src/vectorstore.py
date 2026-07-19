@@ -1,24 +1,13 @@
 """
-Vector store abstraction supporting two interchangeable backends, selected via
-VECTOR_STORE_PROVIDER in .env:
+FAISS-backed vector store.
 
-  - "chroma" (default): native metadata storage + query-time filtering, and
-    persists to disk automatically on every write. Best fit when documents are
-    ingested dynamically at runtime via POST /ingest, since nothing extra has
-    to be done to make a new write durable.
-
-  - "faiss": Meta's similarity-search library. Faster raw nearest-neighbor
-    search at large scale (with IVF/HNSW index types), but persistence is
-    manual -- LangChain's FAISS wrapper only writes to disk when save_local()
-    is called, so this module wraps every add_documents() call with an
-    explicit save to keep that invisible to the rest of the app.
+Persistence is manual with FAISS -- LangChain's wrapper only writes to disk
+when save_local() is called -- so this module wraps every add_documents()
+call with an explicit save to keep that invisible to the rest of the app.
 
 Everything outside this module (nodes.py, the API layer) only ever calls
 get_vectorstore(), add_documents(), list_sources(), and collection_is_empty()
--- never a provider-specific method directly -- which is what makes the
-provider swappable via one env var with zero changes anywhere else. Both
-backends implement LangChain's standard similarity_search_with_score()
-identically, so src/graph/nodes.py needs no branching at all.
+-- never a FAISS-specific method directly.
 """
 from functools import lru_cache
 from pathlib import Path
@@ -29,36 +18,6 @@ from src.llm import get_embeddings
 _FAISS_INDEX_NAME = "index"
 
 
-# ---------------------------------------------------------------------------
-# Chroma backend
-# ---------------------------------------------------------------------------
-def _get_chroma():
-    from langchain_chroma import Chroma
-
-    return Chroma(
-        collection_name=config.COLLECTION_NAME,
-        embedding_function=get_embeddings(),
-        persist_directory=config.VECTOR_STORE_DIR,
-    )
-
-
-def _list_sources_chroma(vs) -> list[dict]:
-    data = vs.get(include=["metadatas"])
-    metadatas = data.get("metadatas", []) or []
-    counts: dict[str, int] = {}
-    for m in metadatas:
-        src = (m or {}).get("source", "unknown")
-        counts[src] = counts.get(src, 0) + 1
-    return [{"source": src, "chunk_count": n} for src, n in sorted(counts.items())]
-
-
-def _is_empty_chroma(vs) -> bool:
-    return vs._collection.count() == 0
-
-
-# ---------------------------------------------------------------------------
-# FAISS backend
-# ---------------------------------------------------------------------------
 def _get_faiss():
     from langchain_community.vectorstores import FAISS
 
@@ -93,52 +52,33 @@ def _save_faiss(vs) -> None:
     vs.save_local(config.VECTOR_STORE_DIR, index_name=_FAISS_INDEX_NAME)
 
 
-def _list_sources_faiss(vs) -> list[dict]:
-    counts: dict[str, int] = {}
-    for doc in vs.docstore._dict.values():
-        src = (doc.metadata or {}).get("source", "unknown")
-        counts[src] = counts.get(src, 0) + 1
-    return [{"source": src, "chunk_count": n} for src, n in sorted(counts.items())]
 
+# Public interface
 
-def _is_empty_faiss(vs) -> bool:
-    return len(vs.docstore._dict) == 0
-
-
-# ---------------------------------------------------------------------------
-# Public interface (provider-agnostic)
-# ---------------------------------------------------------------------------
 @lru_cache(maxsize=1)
 def get_vectorstore():
-    provider = config.VECTOR_STORE_PROVIDER.lower()
-    if provider == "chroma":
-        return _get_chroma()
-    if provider == "faiss":
-        return _get_faiss()
-    raise ValueError(f"Unknown VECTOR_STORE_PROVIDER '{provider}'. Expected 'chroma' or 'faiss'.")
+    return _get_faiss()
 
 
 def add_documents(chunks) -> None:
-    """Add chunks and guarantee they are durable, regardless of backend."""
+    """Add chunks and persist them to disk."""
     vs = get_vectorstore()
     vs.add_documents(chunks)
-    if config.VECTOR_STORE_PROVIDER.lower() == "faiss":
-        _save_faiss(vs)
-    # Chroma persists automatically on write -- nothing further needed.
+    _save_faiss(vs)
 
 
 def list_sources() -> list[dict]:
     """Return distinct source documents currently indexed, with chunk counts."""
     vs = get_vectorstore()
-    provider = config.VECTOR_STORE_PROVIDER.lower()
-    if provider == "faiss":
-        return _list_sources_faiss(vs)
-    return _list_sources_chroma(vs)
+    counts: dict[str, int] = {}
+    for doc_id in vs.index_to_docstore_id.values():
+        doc = vs.docstore.search(doc_id)
+        metadata = getattr(doc, "metadata", None) or {}
+        src = metadata.get("source", "unknown")
+        counts[src] = counts.get(src, 0) + 1
+    return [{"source": src, "chunk_count": n} for src, n in sorted(counts.items())]
 
 
 def collection_is_empty() -> bool:
     vs = get_vectorstore()
-    provider = config.VECTOR_STORE_PROVIDER.lower()
-    if provider == "faiss":
-        return _is_empty_faiss(vs)
-    return _is_empty_chroma(vs)
+    return len(vs.index_to_docstore_id) == 0

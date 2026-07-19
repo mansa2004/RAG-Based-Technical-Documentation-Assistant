@@ -3,9 +3,10 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import HttpUrl, ValidationError
 
 from src import config
 from src.graph.build_graph import run_query
@@ -16,7 +17,6 @@ from src.api.models import (
     QueryRequest,
     QueryResponse,
     GradedDocOut,
-    IngestUrlsRequest,
     IngestResponse,
     DocumentsResponse,
     DocumentInfo,
@@ -111,8 +111,6 @@ def query(req: QueryRequest):
         )
         for g in result.get("graded_documents", [])
     ]
-    used_web_fallback=result.get("used_web_fallback", False),
-
     return QueryResponse(
         question=req.question,
         answer=result.get("answer", ""),
@@ -124,16 +122,34 @@ def query(req: QueryRequest):
         answer_is_grounded=result.get("answer_is_grounded"),
         hallucination_reason=result.get("hallucination_reason"),
         trace=result.get("trace", []),
+        used_web_fallback=result.get("used_web_fallback", False),
     )
 
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest(urls: IngestUrlsRequest = IngestUrlsRequest(), files: list[UploadFile] = File(default=[])):
-    if not urls.urls and not files:
+async def ingest(
+    urls: list[str] = Form(default=[], description="One or more URLs to fetch and ingest."),
+    files: list[UploadFile] = File(default=[]),
+):
+    if not urls and not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide at least one file upload or one URL to ingest.",
         )
+
+    valid_urls: list[str] = []
+    for u in urls:
+        u = u.strip()
+        if not u:
+            continue
+        try:
+            HttpUrl(u)
+        except ValidationError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"'{u}' is not a valid URL.",
+            )
+        valid_urls.append(u)
 
     tmp_paths: list[str] = []
     try:
@@ -157,7 +173,7 @@ async def ingest(urls: IngestUrlsRequest = IngestUrlsRequest(), files: list[Uplo
                     shutil.copyfileobj(f.file, out)
                 tmp_paths.append(str(dest))
 
-        added = ingest_paths(paths=tmp_paths, urls=[str(u) for u in urls.urls])
+        added = ingest_paths(paths=tmp_paths, urls=valid_urls)
         return IngestResponse(chunks_added=added, message=f"Indexed {added} chunks.")
     except HTTPException:
         raise

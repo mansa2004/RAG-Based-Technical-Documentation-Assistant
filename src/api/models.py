@@ -1,5 +1,5 @@
 from typing import Optional
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 
 class QueryRequest(BaseModel):
@@ -26,10 +26,6 @@ class QueryResponse(BaseModel):
     hallucination_reason: Optional[str] = None
     trace: list[str] = []
     used_web_fallback: bool = False
-
-
-class IngestUrlsRequest(BaseModel):
-    urls: list[HttpUrl] = Field(default_factory=list)
 
 
 class IngestResponse(BaseModel):

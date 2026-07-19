@@ -14,9 +14,9 @@ from src import config
 from src.llm import get_llm
 from src.vectorstore import get_vectorstore
 
-# ---------------------------------------------------------------------------
+
 # Node 1: Query Analysis
-# ---------------------------------------------------------------------------
+
 _QUERY_ANALYSIS_PROMPT = """You rewrite user questions about technical documentation to improve \
 vector search retrieval, and classify the question type.
 
@@ -60,9 +60,8 @@ def analyze_query(state: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Node 2: Retrieval
-# ---------------------------------------------------------------------------
+
 def retrieve(state: dict) -> dict:
     query = state.get("search_query") or state["question"]
     vs = get_vectorstore()
@@ -85,9 +84,9 @@ def retrieve(state: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
+
 # Node 3: Document Grading (self-corrective core)
-# ---------------------------------------------------------------------------
+
 _GRADE_PROMPT = """You are grading whether a retrieved document chunk is relevant to a user's question.
 
 Question: {question}
@@ -156,9 +155,9 @@ def route_after_grading(state: dict) -> str:
     return state.get("route", "give_up")
 
 
-# ---------------------------------------------------------------------------
+
 # Fallback: Rewrite query and increment retry counter
-# ---------------------------------------------------------------------------
+
 _REWRITE_PROMPT = """The following search query returned no relevant documents from a technical \
 documentation vector store. Rewrite it as a substantially different query -- try different \
 terminology, a broader or narrower phrasing, or a different angle on the same underlying question. \
@@ -212,9 +211,8 @@ def give_up(state: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
 # Bonus Node: Web search fallback
-# ---------------------------------------------------------------------------
+
 def web_search_fallback(state: dict) -> dict:
     """
     Only reached when the corpus has nothing relevant after MAX_RETRIES rewrites, and
@@ -276,9 +274,9 @@ def route_after_web_search(state: dict) -> str:
     return "generate" if state.get("route") == "generate" else "give_up"
 
 
-# ---------------------------------------------------------------------------
+
 # Node 4: Generation
-# ---------------------------------------------------------------------------
+
 _GENERATE_PROMPT = """Answer the user's question using ONLY the provided context. If the context does not \
 fully answer the question, say what is missing rather than guessing.
 
@@ -324,9 +322,9 @@ def generate(state: dict) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Bonus Node: Hallucination / groundedness check (Self-RAG-inspired)
-# ---------------------------------------------------------------------------
+
+# Node: Hallucination / groundedness check (Self-RAG-inspired)
+
 _GROUNDEDNESS_PROMPT = """Does the ANSWER below rely only on facts present in the CONTEXT, or does it \
 introduce claims not supported by the context?
 
@@ -375,9 +373,8 @@ def check_hallucination(state: dict) -> dict:
     return update
 
 
-# ---------------------------------------------------------------------------
 # helpers
-# ---------------------------------------------------------------------------
+
 def _get_text(raw) -> str:
     """
     Extract plain text from an LLM response. LangChain messages type `.content` as

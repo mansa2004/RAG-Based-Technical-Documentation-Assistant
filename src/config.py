@@ -25,12 +25,12 @@ LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "sentence-transformer
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 # --- Vector store ---
-# One of: "chroma" (native metadata + auto-persistence, best for dynamic /ingest)
-#         "faiss"  (faster raw ANN search at large scale, manual save/load)
+
 VECTOR_STORE_PROVIDER = os.getenv("VECTOR_STORE_PROVIDER", "chroma")
+
+
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "tech_docs")
-# Each provider gets its own subfolder so switching providers never loads stale/foreign data
-VECTOR_STORE_DIR = str(BASE_DIR / "data" / VECTOR_STORE_PROVIDER)
+VECTOR_STORE_DIR = str(BASE_DIR / "data" / "faiss")
 
 # --- Chunking ---
 # Technical docs mix prose with code blocks, so we split on markdown structure first
@@ -39,19 +39,19 @@ VECTOR_STORE_DIR = str(BASE_DIR / "data" / VECTOR_STORE_PROVIDER)
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "700"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 
-# --- Retrieval ---
+#  Retrieval 
 TOP_K = int(os.getenv("TOP_K", "4"))
 
-# --- Self-correction / graph control ---
+# Self-correction / graph control 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))  # query rewrite + re-retrieve attempts
 ENABLE_HALLUCINATION_CHECK = os.getenv("ENABLE_HALLUCINATION_CHECK", "true").lower() == "true"
 ENABLE_WEB_SEARCH_FALLBACK = os.getenv("ENABLE_WEB_SEARCH_FALLBACK", "false").lower() == "true"
 
-# --- Web search fallback (bonus) ---
+# Web search fallback 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
-# --- Feedback storage ---
+#Feedback storage 
 FEEDBACK_DB_PATH = str(BASE_DIR / "data" / "feedback.db")
 
-# --- Corpus ---
+# Corpus 
 CORPUS_DIR = str(BASE_DIR / "corpus")

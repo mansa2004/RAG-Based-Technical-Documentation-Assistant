@@ -1,5 +1,5 @@
 """
-Ingestion pipeline: load documents (files or URLs) -> chunk -> embed -> store in Chroma.
+Ingestion pipeline: load documents (files or URLs) -> chunk -> embed -> store in FAISS.
 
 Chunking strategy
 ------------------
