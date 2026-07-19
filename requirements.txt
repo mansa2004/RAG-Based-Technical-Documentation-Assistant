@@ -1,0 +1,34 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-dotenv==1.0.1
+pydantic==2.10.4
+python-multipart==0.0.20
+
+langgraph==0.2.62
+langchain==0.3.14
+langchain-core>=0.3.30,<0.4
+langchain-text-splitters==0.3.4
+#langchain-chroma==0.1.4
+langchain-huggingface==0.1.2
+langchain-community==0.3.14
+
+# Vector store backends -- comment out whichever you don't use
+#chromadb==0.5.23
+faiss-cpu>=1.9.0
+
+# LLM providers -- keep whichever you use, comment out the rest to slim installs
+langchain-groq==0.2.3
+langchain-google-genai==2.0.7
+langchain-openai==0.2.14
+langchain-anthropic==0.3.3
+
+sentence-transformers==3.3.1
+
+requests==2.32.3
+beautifulsoup4==4.12.3
+
+pytest==8.3.4
+httpx==0.28.1
+
+tavily-python>=0.5.0     # web search fallback (only needed if ENABLE_WEB_SEARCH_FALLBACK=true)
+streamlit>=1.40.0        # ui/streamlit_app.py
