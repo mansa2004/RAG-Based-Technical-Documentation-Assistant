@@ -36,7 +36,7 @@ can optionally fall back to a live web search, and if that also comes up empty i
 ### Install
 
 ```bash
-git clone <this-repo>
+git clone <https://github.com/mansa2004/RAG-Based-Technical-Documentation-Assistant.git>
 cd rag-assistant
 python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
