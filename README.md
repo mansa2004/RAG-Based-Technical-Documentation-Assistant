@@ -25,6 +25,18 @@ can optionally fall back to a live web search, and if that also comes up empty i
 - **UI**: a minimal Streamlit frontend (`ui/streamlit_app.py`) that talks to the FastAPI backend over HTTP.
 
 ---
+## Tech Stack
+
+- Python
+- FastAPI
+- LangGraph
+- LangChain
+- FAISS
+- Sentence Transformers
+- Streamlit
+- Tavily
+- Pydantic
+- SQLite
 
 ## 2. Setup
 
@@ -36,10 +48,19 @@ can optionally fall back to a live web search, and if that also comes up empty i
 ### Install
 
 ```bash
-git clone <https://github.com/mansa2004/RAG-Based-Technical-Documentation-Assistant.git>
-cd rag-assistant
-python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+```bash
+git clone https://github.com/mansa2004/RAG-Based-Technical-Documentation-Assistant.git
+cd RAG-Based-Technical-Documentation-Assistant
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# macOS / Linux
+source .venv/bin/activate
+
 pip install -r requirements.txt
+```
 cp .env.example .env
 ```
 
