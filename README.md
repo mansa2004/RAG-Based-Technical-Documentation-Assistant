@@ -61,15 +61,11 @@ Edit `.env` and set the values you need:
 | `ENABLE_WEB_SEARCH_FALLBACK` | No (default `false`) | Toggles the web search fallback node  |
 | `TAVILY_API_KEY` | Only if `ENABLE_WEB_SEARCH_FALLBACK=true` | When the corpus retry loop is exhausted with nothing relevant, the graph can query Tavily's web search API and generate the answer from live web results instead of just refusing. If this key is missing while the fallback is enabled, the graph safely routes to `give_up` instead of erroring — see `web_search_fallback` in `src/graph/nodes.py`. |
 
-Defaults use local embeddings (`sentence-transformers`), so no embedding API key is required out of the
-box, and the web search fallback is off by default so `TAVILY_API_KEY` is optional unless you turn it on.
-
 ### Run the API
 
 ```bash
 uvicorn src.api.main:app --reload
 ```
-
 On first startup the app automatically ingests everything in `corpus/` into the FAISS index (persisted
 under `data/faiss/`) if it's empty. Visit:
 - `http://localhost:8000/` — landing page with quick links
