@@ -1,5 +1,10 @@
 # Technical Documentation RAG Assistant
 
+![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-Framework-green)
+![LangGraph](https://img.shields.io/badge/LangGraph-Agent-orange)
+![FAISS](https://img.shields.io/badge/VectorStore-FAISS-purple)
+
 A self-corrective RAG system built with **LangGraph** and served via **FastAPI**. It answers questions
 over a small corpus of technical documentation, grades its own retrieved context before answering, and
 retries with a rewritten query (up to a limit) when nothing relevant comes back. If retries are exhausted it
@@ -8,7 +13,7 @@ can optionally fall back to a live web search, and if that also comes up empty i
 
 ---
 
-## 1. Overview
+## 1. Features
 
 - **Corpus**: 5 original markdown documents covering FastAPI (basics, path/query params, request bodies,
   dependency injection, error handling) — written from scratch rather than scraped, so the corpus is small,
@@ -25,18 +30,6 @@ can optionally fall back to a live web search, and if that also comes up empty i
 - **UI**: a minimal Streamlit frontend (`ui/streamlit_app.py`) that talks to the FastAPI backend over HTTP.
 
 ---
-## Tech Stack
-
-- Python
-- FastAPI
-- LangGraph
-- LangChain
-- FAISS
-- Sentence Transformers
-- Streamlit
-- Tavily
-- Pydantic
-- SQLite
 
 ## 2. Setup
 
@@ -48,50 +41,47 @@ can optionally fall back to a live web search, and if that also comes up empty i
 ### Install
 
 ```bash
-```bash
 git clone https://github.com/mansa2004/RAG-Based-Technical-Documentation-Assistant.git
 cd RAG-Based-Technical-Documentation-Assistant
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+### Environment variables
+
+Create a `.env` file from the example:
+
+```bash
 cp .env.example .env
 ```
 
-Edit `.env` and set the values you need:
+| Variable | Description |
+|---|---|
+| `LLM_PROVIDER` | `groq`, `google`, `openai`, or `anthropic` |
+| `LLM_MODEL` | Model name for the selected provider (e.g. `llama-3.1-8b-instant` for Groq) |
+| `GROQ_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | API key for the chosen provider |
+| `EMBEDDING_PROVIDER` | `local` (default, no key needed) or `openai` |
+| `OPENAI_EMBEDDING_MODEL` | Required only if `EMBEDDING_PROVIDER=openai` |
+| `ENABLE_WEB_SEARCH_FALLBACK` | Enables the optional Tavily web search fallback (default `false`) |
+| `TAVILY_API_KEY` | Required only if `ENABLE_WEB_SEARCH_FALLBACK=true`. If missing while enabled, the graph safely routes to `give_up` instead of erroring |
 
-| Variable | Required? | Purpose |
-|---|---|---|
-| `LLM_PROVIDER` | Yes | `groq` \| `google` \| `openai` \| `anthropic` — selects the chat model used by every LLM-backed node |
-| `LLM_MODEL` | Yes | Model name for the chosen provider (e.g. `llama-3.1-8b-instant` for Groq) |
-| `LLM_TEMPERATURE` | No (default `0.0`) | Kept low/zero since grading and generation should be deterministic, not creative |
-| `GROQ_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Only the one matching `LLM_PROVIDER` | Auth for the chat model |
-| `EMBEDDING_PROVIDER` | No (default `local`) | `local` (sentence-transformers, no key needed) or `openai` |
-| `OPENAI_EMBEDDING_MODEL` | Only if `EMBEDDING_PROVIDER=openai` | Embedding model name |
-| `COLLECTION_NAME` | No | Logical name for the indexed collection |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | No | Chunking tunables, see §5 |
-| `TOP_K` | No (default `4`) | Number of chunks retrieved per search |
-| `MAX_RETRIES` | No (default `2`) | Query-rewrite retry limit before falling back / giving up |
-| `ENABLE_HALLUCINATION_CHECK` | No (default `true`) | Toggles the Self-RAG-style groundedness check after generation |
-| `ENABLE_WEB_SEARCH_FALLBACK` | No (default `false`) | Toggles the web search fallback node  |
-| `TAVILY_API_KEY` | Only if `ENABLE_WEB_SEARCH_FALLBACK=true` | When the corpus retry loop is exhausted with nothing relevant, the graph can query Tavily's web search API and generate the answer from live web results instead of just refusing. If this key is missing while the fallback is enabled, the graph safely routes to `give_up` instead of erroring — see `web_search_fallback` in `src/graph/nodes.py`. |
+All remaining settings (`CHUNK_SIZE`, `TOP_K`, `MAX_RETRIES`, `ENABLE_HALLUCINATION_CHECK`, etc.) have
+sensible defaults in `src/config.py` and are explained inline in the Architecture section below where
+they're most relevant — override them in `.env` if you want to tune retrieval or self-correction behavior.
 
 ### Run the API
 
 ```bash
 uvicorn src.api.main:app --reload
 ```
+
 On first startup the app automatically ingests everything in `corpus/` into the FAISS index (persisted
 under `data/faiss/`) if it's empty. Visit:
 - `http://localhost:8000/` — landing page with quick links
 - `http://localhost:8000/docs` — interactive Swagger UI (needed to try POST endpoints with a body)
 - `http://localhost:8000/health` — liveness check
+
+> _Screenshot: FastAPI Swagger UI (`/docs`) — replace this line with an actual screenshot before submitting._
 
 ### Run the UI (optional)
 
@@ -107,6 +97,8 @@ works identically against a local or deployed API. Point it at a different backe
 API_BASE_URL=http://your-host:8000 streamlit run ui/streamlit_app.py
 ```
 
+> _Screenshot: Streamlit UI — replace this line with an actual screenshot before submitting._
+
 ### Run tests
 
 ```bash
@@ -120,69 +112,34 @@ The smoke tests cover chunking and graph-routing logic without requiring an LLM 
 
 ## 3. Architecture
 
-```
-                     ┌──────────────────┐
-        question ──► │  analyze_query   │  rewrite + classify query type
-                     └────────┬─────────┘
-                              ▼
-                     ┌──────────────────┐
-              ┌─────►│    retrieve      │  vector similarity search (top-k)
-              │      └────────┬─────────┘
-              │               ▼
-              │      ┌──────────────────┐
-              │      │ grade_documents  │  LLM grades each chunk relevant/irrelevant
-              │      └────────┬─────────┘
-              │               │
-              │     ┌─────────┼─────────────┐
-              │     ▼         ▼             ▼
-              │  relevant   irrelevant,   irrelevant,
-              │     │      retries left   retries exhausted
-              │     ▼         │             ▼
-              │ ┌─────────┐   │   ┌────────────────────┐
-              │ │generate │   │   │ web_search_fallback │  optional (ENABLE_WEB_SEARCH_FALLBACK)
-              │ └────┬────┘   │   └──────────┬──────────┘
-              │      ▼        │      results │  no results / disabled
-              │ ┌───────────────────┐        ▼              ▼
-              │ │check_hallucination│    (-> generate)  ┌──────────┐
-              │ └────────┬──────────┘  │                │ give_up  │──► END ("I don't know")
-              │          ▼             │                └──────────┘
-              │         END            │
-              │                        ▼
-              │               ┌──────────────────┐
-              └───────────────┤   rewrite_query   │  new search query, retry_count += 1
-                               └──────────────────┘
+```mermaid
+flowchart TD
+    Q[question] --> AQ[analyze_query]
+    AQ --> R[retrieve]
+    R --> GD[grade_documents]
+    GD -->|relevant| GEN[generate]
+    GD -->|irrelevant, retries left| RW[rewrite_query]
+    RW --> R
+    GD -->|irrelevant, retries exhausted| WS{web search<br/>fallback enabled?}
+    WS -->|yes| WSF[web_search_fallback]
+    WS -->|no| GU[give_up]
+    WSF -->|results found| GEN
+    WSF -->|no results| GU
+    GEN --> CH[check_hallucination]
+    CH --> DONE1([END])
+    GU --> DONE2([END: "I don't know"])
 ```
 
 This is implemented in `src/graph/build_graph.py` using `add_conditional_edges` off the grading node's
 output. The retry loop (`rewrite_query → retrieve → grade_documents → ...`) is bounded by `MAX_RETRIES`
-(default 2), checked inside `grade_documents` before the conditional edge routes. The web search fallback
-is a second, independent safety net that only fires after the retry loop is exhausted, and itself always
-terminates in exactly one hop (no retries on the web search side) so the graph's termination guarantee
-stays simple. Note that `give_up` connects straight to `END`, bypassing `check_hallucination` entirely —
-there's no generated answer to check groundedness on when the graph is honestly refusing.
+(default `2`, set via `.env`), checked inside `grade_documents` before the conditional edge routes. The web
+search fallback is a second, independent safety net that only fires after the retry loop is exhausted, and
+itself always terminates in exactly one hop (no retries on the web search side) so the graph's termination
+guarantee stays simple. `check_hallucination` (toggled via `ENABLE_HALLUCINATION_CHECK`, default `true`)
+runs only after `generate` — note that `give_up` connects straight to `END`, bypassing it entirely, since
+there's no generated answer to audit for groundedness when the graph is honestly refusing.
 
-### State schema (`src/graph/state.py`)
-
-The key design decisions, since the assignment calls this out as a core evaluation criterion:
-
-- **`question` vs `search_query`** are kept separate. `question` is the user's original text and is never
-  mutated; `search_query` is what actually gets embedded and searched, and may be rewritten 1–2 times.
-  Generation always answers `question`, even after several rewrites of `search_query` — otherwise the
-  final answer could drift from what the user actually asked.
-- **`retry_count`** is a plain `int`, explicitly incremented by `rewrite_query`, not a LangGraph reducer.
-  The retry-limit check needs to be a simple, synchronous comparison against `MAX_RETRIES` inside the
-  conditional edge, so an accumulator/reducer pattern would add indirection without benefit here.
-- **`documents` vs `graded_documents`** — retrieval output is kept separate from the post-grading filtered
-  set, so the trace/response can show "N retrieved, M kept" for debuggability, instead of silently
-  overwriting the raw retrieval.
-- **`route`** is a small string set by `grade_documents` (`"generate" | "retry" | "give_up"`) and read by a
-  plain Python conditional-edge function (`_route_after_grading`). Keeping the routing decision as an
-  explicit state field (rather than re-deriving it inside the edge function) makes the decision testable in
-  isolation — see `tests/test_graph_smoke.py`.
-- **`trace`** uses LangGraph's reducer pattern (`Annotated[list[str], add]`) since it's the one field that
-  should genuinely accumulate across every node in the run, for observability.
-- **`used_web_fallback`** is set by `web_search_fallback` and surfaced in the API response so a caller can
-  tell whether an answer came from the indexed corpus or from a live web search instead.
+Full reasoning behind the state schema, and every other architectural tradeoff, is in §6.
 
 ---
 
@@ -194,6 +151,13 @@ curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{"question": "How do I define a request body with validation in FastAPI?"}'
 ```
+
+Key fields from the response: `answer` (cites `[03_request_body_and_pydantic.md]`), `sources`, `retries_used: 0`,
+`answer_is_grounded: true`, `used_web_fallback: false`.
+
+<details>
+<summary>Full response JSON</summary>
+
 ```json
 {
   "question": "How do I define a request body with validation in FastAPI?",
@@ -209,6 +173,7 @@ curl -X POST http://localhost:8000/query \
   "used_web_fallback": false
 }
 ```
+</details>
 
 **A question with nothing relevant in the corpus** — captured directly from a real run, demonstrating the
 self-corrective retry loop firing twice before honestly giving up rather than hallucinating an answer:
@@ -217,6 +182,14 @@ curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{"question": "what is the temperature of tungsten?"}'
 ```
+
+Key fields: `retries_used: 2`, `sources: []`, `answer_is_grounded: null` (no answer was generated to
+check — `check_hallucination` never runs on the `give_up` path), `trace` shows two full
+retrieve→grade→rewrite cycles before terminating.
+
+<details>
+<summary>Full response JSON (real captured trace, not mocked)</summary>
+
 ```json
 {
   "question": "what is the temperature of tungsten?",
@@ -268,8 +241,7 @@ curl -X POST http://localhost:8000/query \
   "used_web_fallback": false
 }
 ```
-`answer_is_grounded` and `hallucination_reason` are `null` here because `check_hallucination` never runs
-on the `give_up` path — there's no generated answer to audit for groundedness.
+</details>
 
 **Ingest a new document by URL**
 ```bash
@@ -326,11 +298,37 @@ invisible to the rest of the app. The wrapper uses only FAISS's public `index_to
 
 ## 6. Design decisions & tradeoffs
 
+### State schema (`src/graph/state.py`)
+
+The assignment calls this out as a core evaluation criterion, so the reasoning behind each field:
+
+- **`question` vs `search_query`** are kept separate. `question` is the user's original text and is never
+  mutated; `search_query` is what actually gets embedded and searched, and may be rewritten 1–2 times.
+  Generation always answers `question`, even after several rewrites of `search_query` — otherwise the
+  final answer could drift from what the user actually asked.
+- **`retry_count`** is a plain `int`, explicitly incremented by `rewrite_query`, not a LangGraph reducer.
+  The retry-limit check needs to be a simple, synchronous comparison against `MAX_RETRIES` inside the
+  conditional edge, so an accumulator/reducer pattern would add indirection without benefit here. This is
+  also what guarantees the graph terminates — an unbounded retry loop risks looping forever on a
+  genuinely out-of-corpus question.
+- **`documents` vs `graded_documents`** — retrieval output is kept separate from the post-grading filtered
+  set, so the trace/response can show "N retrieved, M kept" for debuggability, instead of silently
+  overwriting the raw retrieval.
+- **`route`** is a small string set by `grade_documents` (`"generate" | "retry" | "give_up"`) and read by a
+  plain Python conditional-edge function (`_route_after_grading`). Keeping the routing decision as an
+  explicit state field (rather than re-deriving it inside the edge function) makes the decision testable in
+  isolation — see `tests/test_graph_smoke.py`.
+- **`trace`** uses LangGraph's reducer pattern (`Annotated[list[str], add]`) since it's the one field that
+  should genuinely accumulate across every node in the run, for observability.
+- **`used_web_fallback`** is set by `web_search_fallback` and surfaced in the API response so a caller can
+  tell whether an answer came from the indexed corpus or from a live web search instead.
+
+### Other decisions
+
 | Decision | Reasoning | Tradeoff accepted |
 |---|---|---|
 | Explicit `StateGraph` with conditional edges over a ReAct-style tool-calling agent | Matches the assignment's "self-corrective" spec directly; routing is deterministic and unit-testable independent of any LLM call | Less flexible than letting an agent freely decide what to do next |
 | Grade each chunk individually rather than grading the whole retrieved set at once | Lets partially-relevant retrievals through (keep the 2 good chunks, drop the 2 bad ones) instead of an all-or-nothing decision | One LLM call per retrieved chunk — more latency/cost per query than a single batched grading call |
-| `retry_count` as a plain int with a hard `MAX_RETRIES` | Guarantees the graph terminates; an unbounded retry loop risks looping forever on a genuinely out-of-corpus question | Legitimate questions requiring 3+ rewrites will still hit "I don't know" (or the web fallback, if enabled) |
 | SQLite for feedback instead of a flat JSON file | Safe concurrent writes without adding real infrastructure | Adds a (tiny) schema to maintain vs. just appending to a file |
 | Local embeddings by default | Zero-friction setup, no embedding API key needed to try the project | Lower retrieval quality ceiling than OpenAI/Cohere embeddings on more diverse/larger corpora |
 | FAISS as the only vector store | This is a single-instance, single-corpus assistant with no need for query-time metadata filtering or multi-writer concurrency, so FAISS's lighter dependency footprint and faster raw ANN search won out over carrying a second, unused backend | Persistence is manual (`save_local`/`load_local`) rather than automatic on every write, handled once in `src/vectorstore.py` so it's invisible everywhere else |
@@ -372,7 +370,7 @@ invisible to the rest of the app. The wrapper uses only FAISS's public `index_to
 ## 9. Project structure
 
 ```
-rag-assistant/
+RAG-Based-Technical-Documentation-Assistant/
 ├── README.md
 ├── requirements.txt
 ├── .env.example
