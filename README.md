@@ -2,8 +2,8 @@
 
 A self-corrective RAG system built with **LangGraph** and served via **FastAPI**. It answers questions
 over a small corpus of technical documentation, grades its own retrieved context before answering, and
-retries with a rewritten query (up to a limit) when nothing relevant comes back. If retries are exhausted
-it can optionally fall back to a live web search, and if that also comes up empty it gives an honest
+retries with a rewritten query (up to a limit) when nothing relevant comes back. If retries are exhausted it
+can optionally fall back to a live web search, and if that also comes up empty it gives an honest
 "I don't know" instead of hallucinating.
 
 ---
@@ -11,12 +11,13 @@ it can optionally fall back to a live web search, and if that also comes up empt
 ## 1. Overview
 
 - **Corpus**: 5 original markdown documents covering FastAPI (basics, path/query params, request bodies,
-  dependency injection, error handling) — written specifically for this assignment rather than scraped, so
-  the corpus is small, controllable, and free of copyright concerns. Swap in any other docs by dropping
-  `.md`/`.txt`/`.html` files into `corpus/`.
+  dependency injection, error handling) — written from scratch rather than scraped, so the corpus is small,
+  controllable, and free of copyright concerns. Swap in any other docs by dropping `.md`/`.txt`/`.html`
+  files into `corpus/`.
 - **Workflow**: a LangGraph `StateGraph` with query analysis, retrieval, self-corrective document grading,
   generation, an optional web search fallback, and an optional hallucination/groundedness check.
-- **API**: FastAPI with `/query`, `/ingest`, `/documents`, `/feedback`.
+- **API**: FastAPI with `POST /query`, `POST /ingest`, `GET /documents`, `POST /feedback`, plus
+  `GET /health` and a landing page at `GET /`.
 - **Vector store**: FAISS, persisted to disk under `data/faiss/`.
 - **Embeddings**: local `sentence-transformers` model by default (no API key required); OpenAI embeddings
   supported as a drop-in alternative.
@@ -25,47 +26,126 @@ it can optionally fall back to a live web search, and if that also comes up empt
 
 ---
 
-## 2. Architecture
+## 2. Setup
 
-```
-                     ┌──────────────────┐
-        question ──► │  analyze_query   │  rewrite + classify query type
-                     └────────┬─────────┘
-                              ▼
-                     ┌──────────────────┐
-              ┌─────►│    retrieve      │  vector similarity search (top-k)
-              │      └────────┬─────────┘
-              │               ▼
-              │      ┌──────────────────┐
-              │      │ grade_documents  │  LLM grades each chunk relevant/irrelevant
-              │      └────────┬─────────┘
-              │               │
-              │     ┌─────────┼─────────────┐
-              │     ▼         ▼             ▼
-              │  relevant   irrelevant,   irrelevant,
-              │     │      retries left   retries exhausted
-              │     ▼         │             ▼
-              │ ┌─────────┐   │   ┌────────────────────┐
-              │ │generate │   │   │ web_search_fallback │  optional (ENABLE_WEB_SEARCH_FALLBACK)
-              │ └────┬────┘   │   └──────────┬──────────┘
-              │      ▼        │      results │  no results / disabled
-              │ ┌───────────────────┐        ▼              ▼
-              │ │check_hallucination│    (-> generate)  ┌──────────┐
-              │ └────────┬──────────┘  │                │ give_up  │──► END ("I don't know")
-              │          ▼             │                └──────────┘
-              │         END            │
-              │                        ▼
-              │               ┌──────────────────┐
-              └───────────────┤   rewrite_query   │  new search query, retry_count += 1
-                               └──────────────────┘
+### Requirements
+- Python 3.11 or 3.12 (3.13+ has patchy wheel coverage across this dependency stack — stick to 3.11/3.12
+  to avoid source-compiling dependencies like numpy)
+- An API key for one LLM provider (Groq's free tier is easiest to get started with)
+
+### Install
+
+```bash
+git clone <this-repo>
+cd rag-assistant
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-This is implemented in `src/graph/build_graph.py` using `add_conditional_edges` off the grading node's
-output. The retry loop (`rewrite_query → retrieve → grade_documents → ...`) is bounded by
-`MAX_RETRIES` (default 2), checked inside `grade_documents` before the conditional edge routes. The web
-search fallback is a second, independent safety net that only fires after the retry loop is exhausted, and
-itself always terminates in exactly one hop (no retries on the web search side) so the graph's termination
-guarantee stays simple.
+Edit `.env` and set the values you need:
+
+| Variable | Required? | Purpose |
+|---|---|---|
+| `LLM_PROVIDER` | Yes | `groq` \| `google` \| `openai` \| `anthropic` — selects the chat model used by every LLM-backed node |
+| `LLM_MODEL` | Yes | Model name for the chosen provider (e.g. `llama-3.1-8b-instant` for Groq) |
+| `LLM_TEMPERATURE` | No (default `0.0`) | Kept low/zero since grading and generation should be deterministic, not creative |
+| `GROQ_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Only the one matching `LLM_PROVIDER` | Auth for the chat model |
+| `EMBEDDING_PROVIDER` | No (default `local`) | `local` (sentence-transformers, no key needed) or `openai` |
+| `OPENAI_EMBEDDING_MODEL` | Only if `EMBEDDING_PROVIDER=openai` | Embedding model name |
+| `COLLECTION_NAME` | No | Logical name for the indexed collection |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | No | Chunking tunables, see §5 |
+| `TOP_K` | No (default `4`) | Number of chunks retrieved per search |
+| `MAX_RETRIES` | No (default `2`) | Query-rewrite retry limit before falling back / giving up |
+| `ENABLE_HALLUCINATION_CHECK` | No (default `true`) | Toggles the Self-RAG-style groundedness check after generation |
+| `ENABLE_WEB_SEARCH_FALLBACK` | No (default `false`) | Toggles the web search fallback node (see below) |
+| `TAVILY_API_KEY` | Only if `ENABLE_WEB_SEARCH_FALLBACK=true` | **Bonus feature.** When the corpus retry loop is exhausted with nothing relevant, the graph can query Tavily's web search API and generate the answer from live web results instead of just refusing. If this key is missing while the fallback is enabled, the graph safely routes to `give_up` instead of erroring — see `web_search_fallback` in `src/graph/nodes.py`. |
+
+Defaults use local embeddings (`sentence-transformers`), so no embedding API key is required out of the
+box, and the web search fallback is off by default so `TAVILY_API_KEY` is optional unless you turn it on.
+
+### Run the API
+
+```bash
+uvicorn src.api.main:app --reload
+```
+
+On first startup the app automatically ingests everything in `corpus/` into the FAISS index (persisted
+under `data/faiss/`) if it's empty. Visit:
+- `http://localhost:8000/` — landing page with quick links
+- `http://localhost:8000/docs` — interactive Swagger UI (needed to try POST endpoints with a body)
+- `http://localhost:8000/health` — liveness check
+
+### Run the UI (optional)
+
+```bash
+# in a second terminal, with the API already running
+streamlit run ui/streamlit_app.py
+```
+
+The UI is a thin HTTP client over the FastAPI backend — it doesn't import any `src/` module directly, so it
+works identically against a local or deployed API. Point it at a different backend with:
+
+```bash
+API_BASE_URL=http://your-host:8000 streamlit run ui/streamlit_app.py
+```
+
+### Run tests
+
+```bash
+pytest tests/ -v
+```
+
+The smoke tests cover chunking and graph-routing logic without requiring an LLM API key or network access
+— see `tests/test_graph_smoke.py` for exactly what's covered offline vs. what needs a live key.
+
+---
+
+## 3. Architecture
+
+```mermaid
+flowchart TD
+    Q[question] --> AQ[analyze_query]
+    AQ --> R[retrieve]
+    R --> GD[grade_documents]
+
+    GD -->|relevant| GEN[generate]
+    GD -->|irrelevant, retries left| RW[rewrite_query]
+    RW --> R
+
+    GD -->|irrelevant, retries exhausted| WS{web search<br/>fallback enabled?}
+
+    WS -->|yes| WSF[web_search_fallback]
+    WS -->|no| GU[give_up]
+
+    WSF -->|results found| GEN
+    WSF -->|no results| GU
+
+    GEN --> CH[check_hallucination]
+    CH --> DONE1([END])
+
+    GU --> DONE2([END: "I don't know"])
+```
+
+This is implemented in `src/graph/build_graph.py` using LangGraph's
+`StateGraph` and conditional edges.
+
+- Every request starts at **analyze_query**, where the question is classified and
+  rewritten into a search-friendly query.
+- **retrieve** performs semantic similarity search over the FAISS vector store.
+- **grade_documents** evaluates each retrieved chunk for relevance using the LLM.
+- If relevant context exists, the graph proceeds to **generate**.
+- If no relevant context is found and retries remain, **rewrite_query** produces a
+  better search query and the retrieval loop repeats.
+- Once the retry limit (`MAX_RETRIES`) is exhausted, the graph checks whether the
+  optional web search fallback is enabled.
+- When enabled, **web_search_fallback** queries Tavily for live web results.
+  - If useful results are found, generation continues using that context.
+  - Otherwise the graph routes to **give_up**.
+- **generate** is followed by **check_hallucination**, which verifies that the
+  generated answer is grounded in the supplied context.
+- **give_up** terminates immediately with an honest *"I don't know"* response,
+  avoiding hallucinated answers.
 
 ### State schema (`src/graph/state.py`)
 
@@ -92,83 +172,9 @@ The key design decisions, since the assignment calls this out as a core evaluati
 
 ---
 
-## 3. Setup
-
-### Requirements
-- Python 3.11+
-- An API key for one LLM provider (Groq's free tier is easiest to get started with)
-
-### Install
-
-```bash
-git clone <this-repo>
-cd rag-assistant
-python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-Edit `.env` and set the values you need — see the table below for what each one does and whether it's
-required.
-
-| Variable | Required? | Purpose |
-|---|---|---|
-| `LLM_PROVIDER` | Yes | `groq` \| `google` \| `openai` \| `anthropic` — selects the chat model used by every LLM-backed node |
-| `LLM_MODEL` | Yes | Model name for the chosen provider (e.g. `llama-3.1-8b-instant` for Groq) |
-| `LLM_TEMPERATURE` | No (default `0.0`) | Kept low/zero since grading and generation should be deterministic, not creative |
-| `GROQ_API_KEY` / `GOOGLE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Only the one matching `LLM_PROVIDER` | Auth for the chat model |
-| `EMBEDDING_PROVIDER` | No (default `local`) | `local` (sentence-transformers, no key needed) or `openai` |
-| `OPENAI_EMBEDDING_MODEL` | Only if `EMBEDDING_PROVIDER=openai` | Embedding model name |
-| `COLLECTION_NAME` | No | Logical name for the indexed collection |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | No | Chunking tunables, see §5 |
-| `TOP_K` | No (default `4`) | Number of chunks retrieved per search |
-| `MAX_RETRIES` | No (default `2`) | Query-rewrite retry limit before falling back / giving up |
-| `ENABLE_HALLUCINATION_CHECK` | No (default `true`) | Toggles the Self-RAG-style groundedness check after generation |
-| `ENABLE_WEB_SEARCH_FALLBACK` | No (default `false`) | Toggles the web search fallback node (see below) |
-| `TAVILY_API_KEY` | Only if `ENABLE_WEB_SEARCH_FALLBACK=true` | **Bonus feature.** When the corpus retry loop is exhausted with nothing relevant, the graph can query Tavily's web search API and generate the answer from live web results instead of just refusing. If this key is missing while the fallback is enabled, the graph safely routes to `give_up` instead of erroring — see `web_search_fallback` in `src/graph/nodes.py`. |
-
-Defaults use local embeddings (`sentence-transformers`), so no embedding API key is required out of the
-box, and the web search fallback is off by default so `TAVILY_API_KEY` is optional unless you turn it on.
-
-### Run
-
-```bash
-uvicorn src.api.main:app --reload
-```
-
-On first startup the app automatically ingests everything in `corpus/` into the FAISS index (persisted
-under `data/faiss/`) if the collection is empty. Visit `http://localhost:8000/docs` for interactive
-Swagger UI.
-
-### Run the UI (optional)
-
-```bash
-# in a second terminal, with the API already running
-streamlit run ui/streamlit_app.py
-```
-
-The UI is a thin HTTP client over the FastAPI backend — it doesn't import any `src/` module directly, so
-it works identically against a local or deployed API. Point it at a different backend with:
-
-```bash
-API_BASE_URL=http://your-host:8000 streamlit run ui/streamlit_app.py
-```
-
-### Run tests
-
-```bash
-pytest tests/ -v
-```
-
-The smoke tests cover chunking and graph-routing logic without requiring an LLM API key or network
-access (they don't call `analyze_query`/`grade_documents`/`generate` directly — see
-`tests/test_graph_smoke.py` for what's covered offline vs. what needs a live key).
-
----
-
 ## 4. Example API requests
 
-**Ask a question**
+**Ask a question the corpus can answer**
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
@@ -190,14 +196,66 @@ curl -X POST http://localhost:8000/query \
 }
 ```
 
-**A question with nothing relevant in the corpus** (retries exhausted, web fallback disabled/unavailable)
+**A question with nothing relevant in the corpus** — captured directly from a real run, demonstrating the
+self-corrective retry loop firing twice before honestly giving up rather than hallucinating an answer:
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is the boiling point of tungsten?"}'
+  -d '{"question": "what is the temperature of tungsten?"}'
 ```
-`trace` will show `rewrite_query` firing up to `MAX_RETRIES` times, then `give_up`, with `answer` set to
-the honest fallback message and `sources: []`.
+```json
+{
+  "question": "what is the temperature of tungsten?",
+  "answer": "I don't have enough information in the indexed documentation to answer that confidently. Could you rephrase the question, or is it possible this topic isn't covered in the current corpus?",
+  "sources": [],
+  "query_type": "conceptual",
+  "search_query": "tungsten melting point or tungsten thermal conductivity",
+  "retries_used": 2,
+  "graded_documents": [
+    {
+      "source": "03_request_body_and_pydantic.md",
+      "chunk_id": "03_request_body_and_pydantic.md::15",
+      "relevant": false,
+      "reasoning": "The document chunk does not mention temperature or tungsten."
+    },
+    {
+      "source": "03_request_body_and_pydantic.md",
+      "chunk_id": "03_request_body_and_pydantic.md::10",
+      "relevant": false,
+      "reasoning": "The document chunk is about Pydantic models and request bodies, unrelated to tungsten's temperature."
+    },
+    {
+      "source": "05_error_handling.md",
+      "chunk_id": "05_error_handling.md::23",
+      "relevant": false,
+      "reasoning": "The document chunk is about exception handling in a Python application and does not mention temperature or tungsten."
+    },
+    {
+      "source": "01_fastapi_basics.md",
+      "chunk_id": "01_fastapi_basics.md::2",
+      "relevant": false,
+      "reasoning": "The document chunk is about type hints in FastAPI and has no relation to the temperature of tungsten."
+    }
+  ],
+  "answer_is_grounded": null,
+  "hallucination_reason": null,
+  "trace": [
+    "analyze_query: rewritten='tungsten melting point or tungsten boiling point' type=conceptual",
+    "retrieve: 4 chunks for query='tungsten melting point or tungsten boiling point'",
+    "grade_documents: 0/4 relevant -> route=retry",
+    "rewrite_query: attempt 1 -> 'tungsten thermal properties or tungsten critical temperature'",
+    "retrieve: 4 chunks for query='tungsten thermal properties or tungsten critical temperature'",
+    "grade_documents: 0/4 relevant -> route=retry",
+    "rewrite_query: attempt 2 -> 'tungsten melting point or tungsten thermal conductivity'",
+    "retrieve: 4 chunks for query='tungsten melting point or tungsten thermal conductivity'",
+    "grade_documents: 0/4 relevant -> route=give_up",
+    "give_up: exhausted retries with no relevant documents"
+  ],
+  "used_web_fallback": false
+}
+```
+`answer_is_grounded` and `hallucination_reason` are `null` here because `check_hallucination` never runs
+on the `give_up` path — there's no generated answer to audit for groundedness.
 
 **Ingest a new document by URL**
 ```bash
@@ -235,8 +293,9 @@ a **two-pass split**:
    header as metadata (`h1`/`h2`/`h3`). This both improves grading (the LLM sees what section a chunk is
    from) and improves citation quality.
 2. `RecursiveCharacterTextSplitter` then enforces a hard size bound (`CHUNK_SIZE=700` chars,
-   `CHUNK_OVERLAP=100`, ~15%) using separators ordered `["\n\`\`\`", "\n\n", "\n", ". ", " ", ""]` — code
-   fences and paragraph breaks are preferred split points over mid-sentence breaks.
+   `CHUNK_OVERLAP=100`, ~15%) using separators ordered from largest structural break to smallest
+   (code fences, then paragraph breaks, then line breaks, then sentences, then words) — code fences and
+   paragraph breaks are preferred split points over mid-sentence breaks.
 
 **Embeddings**: local `sentence-transformers/all-MiniLM-L6-v2` by default — it's free, requires no API key,
 runs on CPU, and is more than adequate for a 3–5 document corpus. `OPENAI_EMBEDDING_MODEL` is a
@@ -246,8 +305,8 @@ one-line swap in `.env` if higher retrieval quality is needed at scale.
 `add_documents`, `list_sources`, `collection_is_empty`) so `src/graph/nodes.py` and the API layer never
 touch a FAISS-specific method directly. FAISS's LangChain wrapper only persists to disk when
 `save_local()` is called, so `add_documents()` wraps every write with an explicit save — this stays
-invisible to the rest of the app. The wrapper also avoids reaching into FAISS/Docstore private internals,
-using only the public `index_to_docstore_id` mapping and `docstore.search()`.
+invisible to the rest of the app. The wrapper uses only FAISS's public `index_to_docstore_id` mapping and
+`docstore.search()`, avoiding private internals.
 
 ---
 
@@ -257,10 +316,10 @@ using only the public `index_to_docstore_id` mapping and `docstore.search()`.
 |---|---|---|
 | Explicit `StateGraph` with conditional edges over a ReAct-style tool-calling agent | Matches the assignment's "self-corrective" spec directly; routing is deterministic and unit-testable independent of any LLM call | Less flexible than letting an agent freely decide what to do next |
 | Grade each chunk individually rather than grading the whole retrieved set at once | Lets partially-relevant retrievals through (keep the 2 good chunks, drop the 2 bad ones) instead of an all-or-nothing decision | One LLM call per retrieved chunk — more latency/cost per query than a single batched grading call |
-| `retry_count` as a plain int with a hard `MAX_RETRIES` | Guarantees the graph terminates; a `while not satisfied` loop with no ceiling risks infinite loops on a genuinely out-of-corpus question | Legitimate questions requiring 3+ rewrites will still hit "I don't know" (or the web fallback, if enabled) |
+| `retry_count` as a plain int with a hard `MAX_RETRIES` | Guarantees the graph terminates; an unbounded retry loop risks looping forever on a genuinely out-of-corpus question | Legitimate questions requiring 3+ rewrites will still hit "I don't know" (or the web fallback, if enabled) |
 | SQLite for feedback instead of a flat JSON file | Safe concurrent writes without adding real infrastructure | Adds a (tiny) schema to maintain vs. just appending to a file |
 | Local embeddings by default | Zero-friction setup, no embedding API key needed to try the project | Lower retrieval quality ceiling than OpenAI/Cohere embeddings on more diverse/larger corpora |
-| FAISS as the only vector store | This is a single-instance, single-corpus assistant with no need for query-time metadata filtering or multi-writer concurrency, so FAISS's lighter dependency footprint and faster raw ANN search won out over carrying an unused second backend | Persistence is manual (`save_local`/`load_local`) rather than automatic on every write, handled once in `src/vectorstore.py` so it's invisible everywhere else |
+| FAISS as the only vector store | This is a single-instance, single-corpus assistant with no need for query-time metadata filtering or multi-writer concurrency, so FAISS's lighter dependency footprint and faster raw ANN search won out over carrying a second, unused backend | Persistence is manual (`save_local`/`load_local`) rather than automatic on every write, handled once in `src/vectorstore.py` so it's invisible everywhere else |
 | Hallucination check as a separate node after generation, toggleable | Keeps the core required pipeline (analysis→retrieve→grade→generate) uncluttered while still demonstrating the Self-RAG-style bonus | Doubles the LLM calls on the generation path when enabled |
 | Web search fallback as a second, independent safety net after the retry loop | Lets the assistant answer from live web results instead of refusing outright, without touching the corpus retry-loop's termination guarantee | Adds a third-party dependency (Tavily) and an extra network call on the rare path where the corpus genuinely has nothing relevant |
 
@@ -289,7 +348,7 @@ using only the public `index_to_docstore_id` mapping and `docstore.search()`.
 - A single retry limit (`MAX_RETRIES=2`) applies uniformly regardless of query type; a more sophisticated
   system might vary this by `query_type` (e.g., allow more retries for `troubleshooting` questions).
 - File uploads for `/ingest` are restricted to `.md`, `.txt`, `.html` to match the ingestion pipeline's loaders;
-  PDF ingestion was out of scope for the 2-day window.
+  PDF ingestion was out of scope.
 - The web search fallback is opt-in (`ENABLE_WEB_SEARCH_FALLBACK=false` by default) since it changes the
   system's behavior from "only answers from the indexed corpus" to "may answer from the open web," which
   felt like something a deployer should choose deliberately rather than get by default.
@@ -306,16 +365,16 @@ rag-assistant/
 ├── corpus/                     # 5 original markdown docs (FastAPI topics)
 ├── src/
 │   ├── config.py                # all tunables, env-var driven
-│   ├── llm.py                   # provider-agnostic LLM + embeddings factory
+│   ├── llm.py                   # provider-agnostic LLM + embeddings + web-search-client factory
 │   ├── ingestion.py             # load -> chunk -> embed -> store
 │   ├── vectorstore.py           # FAISS vector store wrapper
 │   ├── graph/
 │   │   ├── state.py             # GraphState TypedDict
 │   │   ├── nodes.py             # analyze_query, retrieve, grade_documents, generate,
-│   │   │                        # rewrite_query, web_search_fallback, check_hallucination
+│   │   │                        # rewrite_query, give_up, web_search_fallback, check_hallucination
 │   │   └── build_graph.py       # StateGraph wiring + conditional edges
 │   └── api/
-│       ├── main.py              # FastAPI app: /query /ingest /documents /feedback
+│       ├── main.py              # FastAPI app: / /health /query /ingest /documents /feedback
 │       ├── models.py            # Pydantic request/response schemas
 │       └── feedback_store.py    # SQLite feedback persistence
 ├── scripts/
@@ -325,4 +384,3 @@ rag-assistant/
 └── tests/
     └── test_graph_smoke.py       # offline tests: chunking + routing logic
 ```
-

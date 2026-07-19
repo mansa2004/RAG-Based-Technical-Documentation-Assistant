@@ -12,30 +12,27 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# --- LLM provider ---
+# LLM provider 
 # One of: "groq", "google", "openai", "anthropic"
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 
-# --- Embeddings ---
+# Embeddings 
 # One of: "local" (sentence-transformers, no API key needed) or "openai"
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local")
 LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
-# --- Vector store ---
 
-VECTOR_STORE_PROVIDER = os.getenv("VECTOR_STORE_PROVIDER", "chroma")
-
-
+#Vector store (FAISS)
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "tech_docs")
 VECTOR_STORE_DIR = str(BASE_DIR / "data" / "faiss")
 
-# --- Chunking ---
+# Chunking 
 # Technical docs mix prose with code blocks, so we split on markdown structure first
 # (headers, then paragraphs, then code fences) before falling back to raw character
-# splitting. See README "Chunking Strategy" section for the full rationale.
+# splitting. See README "Chunking Strategy" .
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "700"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 

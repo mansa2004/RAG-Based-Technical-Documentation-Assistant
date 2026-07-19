@@ -73,7 +73,7 @@ with st.sidebar:
     if st.button("Ingest URL", disabled=not url_input):
         with st.spinner("Fetching and ingesting..."):
             try:
-                r = requests.post(f"{API_BASE_URL}/ingest", json={"urls": [url_input]}, timeout=60)
+                r = requests.post(f"{API_BASE_URL}/ingest", data={"urls": url_input}, timeout=60)
                 if r.ok:
                     st.success(r.json().get("message", "Ingested."))
                 else:

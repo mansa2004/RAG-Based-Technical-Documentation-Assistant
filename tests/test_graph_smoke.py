@@ -63,27 +63,25 @@ def test_routing_function_give_up_with_web_fallback(monkeypatch):
     assert _route_after_grading({"route": "give_up"}) == "web_search_fallback"
 
 
-def test_grade_documents_routing_logic():
-    """Unit test the pure routing decision inside grade_documents without calling an LLM."""
+def test_grade_documents_routing_logic(monkeypatch):
+    """Calls the real grade_documents function (not a copy of its logic) with a fake LLM."""
+    from src.graph import nodes
     from src import config as cfg
+    import json
 
-    # Simulate: no relevant docs found, under retry limit -> should retry
-    kept = []
-    retry_count = 0
-    if kept:
-        route = "generate"
-    elif retry_count < cfg.MAX_RETRIES:
-        route = "retry"
-    else:
-        route = "give_up"
-    assert route == "retry"
+    class FakeLLM:
+        def invoke(self, messages):
+            from langchain_core.messages import AIMessage
+            return AIMessage(content=json.dumps({"relevant": False, "reasoning": "test"}))
 
-    # Simulate: retries exhausted -> should give up
-    retry_count = cfg.MAX_RETRIES
-    if kept:
-        route = "generate"
-    elif retry_count < cfg.MAX_RETRIES:
-        route = "retry"
-    else:
-        route = "give_up"
-    assert route == "give_up"
+    monkeypatch.setattr(nodes, "get_llm", lambda: FakeLLM())
+
+    documents = [{"content": "irrelevant text", "source": "x.md", "chunk_id": "x::0"}]
+
+   
+    result = nodes.grade_documents({"question": "q", "documents": documents, "retry_count": 0})
+    assert result["route"] == "retry"
+
+    
+    result = nodes.grade_documents({"question": "q", "documents": documents, "retry_count": cfg.MAX_RETRIES})
+    assert result["route"] == "give_up"
